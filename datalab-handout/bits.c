@@ -261,7 +261,31 @@ int howManyBits(int x) {
  *   Rating: 4
  */
 unsigned floatScale2(unsigned uf) {
-  return 2;
+  // 1 get exponent, sign, frac
+  int sign = (uf>>31)&(0x1);
+  int exponent = (uf>>23)&(0xFF);
+  int frac = (uf)&(0x7FFFFF);
+
+  // uf = 0
+  if (exponent == 0 && frac == 0) {
+    return uf;
+  }
+
+  // infinity or not a number
+  if (exponent == 0xFF) {
+    return uf;
+  }
+
+  // denormalize
+  if (exponent == 0) {
+    frac = frac<<1;
+  }
+
+  if (exponent != 0) {
+    exponent++;
+  }
+
+  return (sign<<31) | (exponent<<23) | (frac);
 }
 /* 
  * floatFloat2Int - Return bit-level equivalent of expression (int) f
@@ -276,7 +300,45 @@ unsigned floatScale2(unsigned uf) {
  *   Rating: 4
  */
 int floatFloat2Int(unsigned uf) {
-  return 2;
+  // 1 get sign exponent frac
+  int sign = (uf>>31)&(0x1);
+  int exponent = (uf>>23)&(0xFF);
+  int frac = uf&(0x7FFFFF);
+  
+  // uf = 0 
+  if (exponent == 0 & frac == 0) {
+    return 0;
+  }
+
+  // infinity NaN
+  if (exponent == 0xFF) {
+    return 1<<31;
+  }
+
+  // denormalize
+  if (exponent == 0) {
+    // 0.111111(binary) < 1
+    return 0;
+  }
+
+  // normalize
+  int M = frac | (0x1<<23);
+  int E = exponent - 127;
+  if (E > 31) {
+    return 1<<31;
+  } else if (E > 23) {
+    M <<= (E-23);
+  } else if (E >= 0) {
+    M >>= (23 - E);
+  } else {
+    return 0;
+  }
+
+  if (sign) {
+    return ~M+1;
+  } else {
+    return M;
+  }
 }
 /* 
  * floatPower2 - Return bit-level equivalent of the expression 2.0^x
