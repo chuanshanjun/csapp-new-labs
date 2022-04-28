@@ -15,6 +15,7 @@
 #include <getopt.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <limits.h>
 
 const char* tipMsg = "Usage: ./csim-ref [-hv] -s <num> -E <num> -b <num> -t <file>\n\
 Options:\n\
@@ -42,6 +43,10 @@ int missCounts;
 int evictionCounts;
 
 void updateCache(cache_line** cache, int S, int s, int E, int b, unsigned long address, int size) {
+    // 因为stamp默认值为-1, 缓存第一次被设置时为0, 为了便于之后比较所以使用INT_MIN
+    int maxStamp = INT_MIN;
+    int maxStampIndex = -1;
+
     // 获取S
     // 1 右移b位，因为是无符号数，所以不用担心符号位
     // identifier >> b;
@@ -70,9 +75,12 @@ void updateCache(cache_line** cache, int S, int s, int E, int b, unsigned long a
     // 先判断是否命中
     // 循环 validbit == 1 & tag == tag
     for (int i = 0; i < E; i++) {
+        // //如果tag相同，就hit，重置时间戳
         if (cache[sIndex][i].validbit == 1 && cache[sIndex][i].tag == tag) {
+            cache[sIndex][i].stamp = 0;
             hitCounts++;
             printf(" hit");
+            // printf(" sIndex = %lx, tag=%lx", sIndex, tag);
             return;
         }
     }
@@ -87,21 +95,32 @@ void updateCache(cache_line** cache, int S, int s, int E, int b, unsigned long a
 
     // 满 -> miss 并替换]
     if (totalE == E) {
-        unsigned long minEIndex = 0;
+        // 备注：错误思路，只是找到最少被使用的那个值，然后替换
+        // 但LRU思想是，替换最久未被使用的那个
+        // unsigned long minEIndex = 0;
         // 先找到值最小的索引
-        for (int j = 0; j < (E - 1); j++) {
-            if (cache[sIndex][j+1].stamp < cache[sIndex][j].stamp) {
-                minEIndex = j+1;
+        // for (int j = 0; j < (E - 1); j++) {
+        //     if (cache[sIndex][j+1].stamp < cache[sIndex][j].stamp) {
+        //         minEIndex = j+1;
+        //     }
+        // }
+
+        // 找到max_stamp那个，因为最大的那个是最久未更新过的
+        for (int i = 0; i < E; i++) {
+            if (cache[sIndex][i].stamp > maxStamp) {
+                maxStamp = cache[sIndex][i].stamp;
+                maxStampIndex = i;
             }
         }
 
         // 替换
-        cache[sIndex][minEIndex].validbit = 1;
-        cache[sIndex][minEIndex].tag = tag;
-        cache[sIndex][minEIndex].stamp = 0;  
+        cache[sIndex][maxStampIndex].validbit = 1;
+        cache[sIndex][maxStampIndex].tag = tag;
+        cache[sIndex][maxStampIndex].stamp = 0;  
         missCounts++;
         evictionCounts++;  
         printf(" miss eviction");    
+        printf(" sIndex = %lx, tag=%lx", sIndex, tag);
     } else {
         // 缓存未满，放置
         for (int j = 0; j < E; j++) {
@@ -111,6 +130,7 @@ void updateCache(cache_line** cache, int S, int s, int E, int b, unsigned long a
                 cache[sIndex][j].validbit = 1;
                 missCounts++;
                 printf(" miss");
+                // printf(" sIndex = %lx, tag=%lx", sIndex, tag);
                 break;
             }
         }
@@ -164,8 +184,9 @@ int main(int argc, char** argv) {
         // 初始化每个结构的信息
         for (int j = 0; j < E; j++) {
             cache[i][j].validbit = 0;
-            cache[i][j].tag = 0;
-            cache[i][j].stamp = 0;
+            cache[i][j].tag = -1;
+            // 因为更新缓存时stamp会设置为0, 所以此处还是设置成-1, 用于区别
+            cache[i][j].stamp = -1;
         }
     }
 
@@ -206,6 +227,15 @@ int main(int argc, char** argv) {
         if (identifier == 'I') {
             // printf("identifier == I\n");
             continue;
+        }
+
+        // 关键：每次处理完一条数据后，更新stamp的值，所以stamp最大的就是最久未被使用的缓存
+        for (int i = 0; i < S; i++) {
+            for (int j = 0;j < E; j++) {
+                if (cache[i][j].validbit == 1) {
+                    cache[i][j].stamp++;
+                }
+            }
         }
     }
 
