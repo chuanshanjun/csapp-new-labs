@@ -22,6 +22,17 @@ int is_transpose(int M, int N, int A[N][M], int B[M][N]);
 char transpose_submit_desc[] = "Transpose submission";
 void transpose_submit(int M, int N, int A[N][M], int B[M][N])
 {
+    // 假设是8*8块
+    for (int i = 0; i < N; i+=8) {
+        for (int j = 0; j < M; j+=8) {
+            for (int i1 = 0; i1 < 8; i1++) {
+                for (int j1 = 0; j1 < 8; j1++) {
+                    int tmp = A[i1 + i][j1 + j];
+                    B[j1 + j][i1+ i] = tmp;
+                }
+            }
+        }
+    }
 }
 
 /* 
