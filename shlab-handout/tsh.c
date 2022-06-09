@@ -176,21 +176,23 @@ void eval(char *cmdline)
     int bg;
     pid_t pid;
 
-    sigset_t mask_all, mask_one, prev_all;
-    sigfillset(&mask_all);
-    sigemptyset(&mask_one);
-    sigaddset(&mask_one, SIGCHLD);
-
     strcpy(buf, cmdline);
 
     bg = parseline(buf, argv);
 
     // 如果不是内置命令则需要新建线程操作了
     if (!builtin_cmd(argv)) {
-        sigprocmask(SIG_BLOCK, &mask_one, &prev_all); /* Block SIGCHLD */
+
+        // 把这些是因为 上面在执行builtin_cmd 万一遇到个 信号想直接把我杀死，所以把信号放在下面
+        sigset_t mask;
+        sigfillset(&mask);
+        sigaddset(&mask, SIGCHLD);
+        sigprocmask(SIG_BLOCK, &mask, NULL); /* Block SIGCHLD */
         if ((pid = fork()) == 0) { // chlid process
             // 使用execv执行
-            sigprocmask(SIG_SETMASK, &prev_all, NULL); /* Unblock SIGCHLD */
+            sigprocmask(SIG_UNBLOCK, &mask, NULL); /* Unblock SIGCHLD */
+            setpgid(0, 0); // set the child process to the 独立
+
             if ((execve(argv[0], argv, environ)) < 0) { 
                 printf("%s: Command not found.\n", argv[0]);
                 exit(0);
@@ -199,21 +201,36 @@ void eval(char *cmdline)
 
         if (!bg) {
             // 如果命令是/bin/echo 开头的 我们就不添加任务
-            if (memcmp("/bin/echo", buf, 9)) {
-                sigprocmask(SIG_BLOCK, &mask_all, NULL); /* Parent process */
-                // 往jobs添加job
-                addjob(jobs, pid, FG, buf);
-                sigprocmask(SIG_SETMASK, &prev_all, NULL); /*  Unblock SIGCHLD*/
-            }
+            // if (memcmp("/bin/echo", buf, 9)) {
+            //     sigprocmask(SIG_BLOCK, &mask, NULL); /* Parent process */
+            //     // 往jobs添加job
+            //     addjob(jobs, pid, FG, buf);
+            //     sigprocmask(SIG_SETMASK, &mask, NULL); /*  Unblock SIGCHLD*/
+            // }
 
-            waitfg(pid);
+            // waitfg(pid);
+            addjob(jobs, pid, FG, cmdline);
         } else {
-            sigprocmask(SIG_BLOCK, &mask_all, NULL); /* Parent process */
-            // 往jobs添加job
-            addjob(jobs, pid, BG, buf);
-            sigprocmask(SIG_SETMASK, &prev_all, NULL); /*  Unblock SIGCHLD*/
+            // sigprocmask(SIG_BLOCK, &mask_all, NULL); /* Parent process */
+            // // 往jobs添加job
+            // addjob(jobs, pid, BG, buf);
+            // sigprocmask(SIG_SETMASK, &prev_all, NULL); /*  Unblock SIGCHLD*/
 
-            // 获取jobid
+            // // 获取jobid
+            // printf("[%d] (%d) %s", pid2jid(pid), pid, buf);
+            addjob(jobs, pid, BG, cmdline);
+        }
+
+        // 类似于 释放锁
+        sigprocmask(SIG_UNBLOCK, &mask, NULL);
+
+        // if bg/fg
+        if (!bg) {
+            // wait for fg
+            waitfg(pid);
+        } 
+        else {
+            // print for bg
             printf("[%d] (%d) %s", pid2jid(pid), pid, buf);
         }
     }
@@ -290,10 +307,16 @@ int builtin_cmd(char **argv)
 
     if (!strcmp(argv[0], "fg")) {
         do_bgfg(argv);
+        return 1;
     }
 
     if (!strcmp(argv[0], "bg")) {
         do_bgfg(argv);
+        return 1;
+    }
+
+    if (!strcmp(argv[0], "&")) {
+        return 1;
     }
 
     // jobs命令,展示任务队列
@@ -309,6 +332,66 @@ int builtin_cmd(char **argv)
  */
 void do_bgfg(char **argv) 
 {
+    struct job_t *job;
+    char *tmp;
+    int jid;
+    pid_t pid;
+
+    tmp = argv[1];
+
+    // if id does not exist
+    // eg bg 
+    if (tmp == NULL) {
+        printf("%s command require PID or jobid arguments\n", argv[0]);
+        return;
+    }
+
+    // if it is a jid
+    if (tmp[0] == '%') {
+        jid = atoi(&tmp[1]);
+        // get job
+        job = getjobjid(jobs, jid);
+        if (job == NULL) {
+            printf("%s: NO such job\n", tmp);
+            return;
+        } else {
+            pid = job->pid;
+        }
+    }
+
+    // if it is a pid
+    else if(isdigit(tmp[0])) {
+        // get pid
+        pid = atoi(tmp);
+        // get job
+        job = getjobpid(jobs, pid);
+        // 防止 bg 999 or fg aaa
+        if (job == NULL) {
+            printf("(%d) no such process\n", pid);
+            return;
+        }
+    }
+
+    else {
+        printf("%s: argument must be a PID or jid\n", argv[0]);
+        return;
+    }
+
+    // bg %1
+    // kill for each time
+    kill(-pid, SIGCONT); // 工作停的话，让工作重新启动
+
+    if (!strcmp("fg", argv[0])) {
+        // wait for fg
+        job->state = FG;
+        waitfg(job->pid);
+    }
+    else {
+        // print for bg
+        printf("[%d] [%d] %d", job->jid, job->pid, job->cmdline);
+        job->state = BG;
+    }
+
     return;
 }
 
@@ -317,13 +400,21 @@ void do_bgfg(char **argv)
  */
 void waitfg(pid_t pid)
 {
+    // pid_t pid;
 
+    // int status;
+    // if (waitpid(pid, &status, 0) < 0) {
+    //     unix_error("waitfg: waitpid error");
+    // }
 
-    int status;
-    if (waitpid(pid, &status, 0) < 0) {
-        unix_error("waitfg: waitpid error");
+    struct job_t* job = getjobpid(jobs, pid);
+    if (job == NULL)
+        return;
+
+    // 前台任务的id 和我现在 任务的id 一样，那就自旋
+    while (fgpid(jobs) == pid) {
+
     }
-
 
 
     return;
@@ -339,9 +430,33 @@ void waitfg(pid_t pid)
  *     received a SIGSTOP or SIGTSTP signal. The handler reaps all
  *     available zombie children, but doesn't wait for any other
  *     currently running children to terminate.  
+ *  为什么不在信号处理里面做信号屏蔽呢？
+ *  1 同类型的信号一次只能响应一个，然后阻塞一个(不会打断我正在做的信号处理程序)
+ *  2 不同类型的信号可以互相中断
+ * 
  */
 void sigchld_handler(int sig) 
 {
+    int olderrno = errno;
+    pid_t pid;
+    int status;
+
+    while ((pid = waitpid(-1, &status, WNOHANG | WUNTRACED)) > 0) {
+        // enter here means that one of child has changed status
+        if (WIFEXITED(status)) {
+            // exit normally exit(0) exit(1)
+            deletejob(jobs, pid);
+        } else if (WIFSIGNALED(status)) {
+            // terminated by signal
+            deletejob(jobs, pid);
+        } else if (WIFSTOPPED(status)) {
+            // stops need change status
+            struct job_t* job = getjobpid(jobs, pid);
+            job->state = ST;
+        }   
+    }
+    
+    errno = olderrno;
     return;
 }
 
@@ -352,33 +467,48 @@ void sigchld_handler(int sig)
  */
 void sigint_handler(int sig) 
 {
-    int olderrno = errno;
-    pid_t pid;
-    int jid;
+    // 这些是自己做的
+    // int olderrno = errno;
+    // pid_t pid;
+    // int jid;
 
-    sigset_t mask_all, prev_all;
-    sigfillset(&mask_all);
+    // sigset_t mask_all, prev_all;
+    // sigfillset(&mask_all);
 
-    // 获取foreground pid
-    pid = fgpid(jobs);
+    // // 获取foreground pid
+    // pid = fgpid(jobs);
     
-    // 获取foreground jid
-    jid = pid2jid(pid);
+    // if (!pid) {
+    //     errno = olderrno;
+    //     return;
+    // }
 
-    // 删除job时， 阻塞所有信号
-    sigprocmask(SIG_BLOCK, &mask_all, NULL); /* Parent process */
-    deletejob(jobs, pid);
-    sigprocmask(SIG_SETMASK, &prev_all, NULL); /*  Unblock SIGCHLD*/
+    // // 获取foreground jid
+    // jid = pid2jid(pid);
 
-    // 发送信号 
-    kill(pid, sig);
+    // // 删除job时， 阻塞所有信号
+    // sigprocmask(SIG_BLOCK, &mask_all, NULL); /* Parent process */
+    // deletejob(jobs, pid);
+    // sigprocmask(SIG_SETMASK, &prev_all, NULL); /*  Unblock SIGCHLD*/
 
-    char str[70];
-    sprintf(str, "Job [%d] (%d) terminated by signal %d\n", jid, pid, sig);
+    // // 发送信号 
+    // kill(pid, sig);
 
-    write(STDOUT_FILENO, str, strlen(str));
+    // char str[70];
+    // sprintf(str, "Job [%d] (%d) terminated by signal %d\n", jid, pid, sig);
 
-    errno = olderrno;
+    // write(STDOUT_FILENO, str, strlen(str));
+
+    // errno = olderrno;
+    
+    // 按照网上的教程做的
+    pid_t pid = fgpid(jobs);
+    if (pid == 0)
+        return
+
+    // -pid是因为process 可能会fork出其他的process
+    kill(-pid, sig);
+
     return;
 }
 
@@ -389,6 +519,37 @@ void sigint_handler(int sig)
  */
 void sigtstp_handler(int sig) 
 {
+    // int olderrno = errno;
+
+    // pid_t pid;
+    // int jid;
+
+    // // 1 获取fg pid
+    // pid = fgpid(jobs);
+
+    // if (!pid) {
+    //     errno = olderrno;
+    //     return;
+    // }
+
+    // jid = pid2jid(pid);
+
+    // // 2 往pid 发送信号 
+    // kill(pid, sig);
+
+    // // 3 输出
+    // char msg[70];
+    // sprintf(msg, "Job [%d] (%d) stopped by signal %d\n", jid, pid, sig);
+    // write(STDOUT_FILENO, msg, strlen(msg));
+
+    // errno = olderrno;
+
+    pid_t pid = fgpid(jobs);
+    if (pid == 0)
+        return;
+
+    // 进程组
+    kill(-pid, sig);
     return;
 }
 
